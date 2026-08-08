@@ -5,24 +5,43 @@ import (
 	"io"
 )
 
-// WalkSegmentPayloads reads exactly one payload for each segment in metadata.
-// The callback receives a fresh byte slice owned by the caller. The function
-// rejects truncated input and trailing bytes, which prevents committing an
-// entry whose logical file differs from the playlist used to segment it.
-func WalkSegmentPayloads(reader io.Reader, metadata *Metadata, maxSegmentSize int64, fn func(index int, segment Segment, data []byte) error) error {
-	if err := Validate(metadata, -1, maxSegmentSize); err != nil {
+// WalkSegmentChunks reads each segment from reader and splits it into storage
+// chunks no larger than maxChunkSize, invoking fn once per chunk with the
+// chunk's absolute byte offset in the media file and a fresh slice owned by the
+// caller. A chunk never spans a segment boundary, so every segment maps to a
+// contiguous run of whole chunks and a later segment read fetches only those
+// chunks instead of slicing a larger object; the trailing chunk of a segment
+// holds only the remainder so no padding is stored or read. maxChunkSize <= 0
+// stores each segment as a single chunk.
+//
+// The function rejects truncated input and trailing bytes, which prevents
+// committing an entry whose logical file differs from the playlist used to
+// segment it.
+func WalkSegmentChunks(reader io.Reader, metadata *Metadata, maxChunkSize int64, fn func(segmentIndex int, chunkOffset int64, data []byte) error) error {
+	if err := Validate(metadata, -1, 0); err != nil {
 		return err
 	}
+	maxInt := int64(int(^uint(0) >> 1))
 	for i, segment := range metadata.Segments {
-		if segment.Size > int64(int(^uint(0)>>1)) {
-			return fmt.Errorf("segment %d is too large for this platform: %d", i, segment.Size)
-		}
-		data := make([]byte, int(segment.Size))
-		if _, err := io.ReadFull(reader, data); err != nil {
-			return fmt.Errorf("read segment %d (%d bytes): %w", i, segment.Size, err)
-		}
-		if err := fn(i, segment, data); err != nil {
-			return fmt.Errorf("process segment %d: %w", i, err)
+		offset := segment.Offset
+		remaining := segment.Size
+		for remaining > 0 {
+			chunkSize := remaining
+			if maxChunkSize > 0 && chunkSize > maxChunkSize {
+				chunkSize = maxChunkSize
+			}
+			if chunkSize > maxInt {
+				return fmt.Errorf("segment %d chunk at offset %d is too large for this platform: %d", i, offset, chunkSize)
+			}
+			data := make([]byte, int(chunkSize))
+			if _, err := io.ReadFull(reader, data); err != nil {
+				return fmt.Errorf("read segment %d chunk at offset %d (%d bytes): %w", i, offset, chunkSize, err)
+			}
+			if err := fn(i, offset, data); err != nil {
+				return fmt.Errorf("process segment %d chunk at offset %d: %w", i, offset, err)
+			}
+			offset += chunkSize
+			remaining -= chunkSize
 		}
 	}
 

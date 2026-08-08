@@ -124,6 +124,35 @@ video.ts
 	}
 }
 
+func TestValidateTSPackets(t *testing.T) {
+	packet := func(sync byte) []byte {
+		p := make([]byte, TSPacketSize)
+		p[0] = sync
+		return p
+	}
+
+	valid := append(packet(0x47), packet(0x47)...)
+	if err := ValidateTSPackets(valid); err != nil {
+		t.Fatalf("ValidateTSPackets(valid) error = %v", err)
+	}
+
+	if err := ValidateTSPackets(packet(0x47)[:187]); err == nil {
+		t.Fatal("ValidateTSPackets accepted a non-packet-aligned length")
+	}
+
+	badSync := append(packet(0x47), packet(0x00)...)
+	if err := ValidateTSPackets(badSync); err == nil {
+		t.Fatal("ValidateTSPackets accepted a packet without the 0x47 sync byte")
+	}
+
+	// An MP4 begins with a box size and the "ftyp" fourcc, never 0x47.
+	mp4 := make([]byte, TSPacketSize)
+	copy(mp4, []byte{0x00, 0x00, 0x00, 0x20, 'f', 't', 'y', 'p'})
+	if err := ValidateTSPackets(mp4); err == nil {
+		t.Fatal("ValidateTSPackets accepted MP4 content as MPEG-TS")
+	}
+}
+
 func TestValidate(t *testing.T) {
 	metadata := &Metadata{
 		Version:        MetadataVersion,

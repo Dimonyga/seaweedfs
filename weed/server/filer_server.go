@@ -88,6 +88,7 @@ type FilerOption struct {
 	TusSessionExpiry          time.Duration
 	S3ConfigFile              string // optional path to static S3 identity config file
 	CredentialManager         *credential.CredentialManager
+	HlsTsEnabled              bool // opt-in chunk-aligned HLS TS ingest and serving
 }
 
 type FilerServer struct {
@@ -231,6 +232,7 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 	go fs.filer.MasterClient.KeepConnectedToMaster(context.Background())
 
 	fs.option.recursiveDelete = v.GetBool("filer.options.recursive_delete")
+	fs.option.HlsTsEnabled = v.GetBool("filer.options.hls_ts_enabled")
 	v.SetDefault("filer.options.buckets_folder", "/buckets")
 	fs.filer.DirBucketsPath = v.GetString("filer.options.buckets_folder")
 	// TODO deprecated, will be removed after 2020-12-31

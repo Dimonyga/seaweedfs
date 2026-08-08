@@ -6,12 +6,21 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/seaweedfs/seaweedfs/weed/util"
+	media_hls "github.com/seaweedfs/seaweedfs/weed/media/hls"
 )
 
 const (
-	hlsTsVirtualPrefix = "/.hls/"
+	hlsTsVirtualPrefix = "/hls/"
 	hlsTsMetadataKey   = "Seaweed-Hls-Ts-Metadata"
+
+	// hlsTsSegmentPrefetch bounds how many chunks a multi-chunk segment read
+	// fetches concurrently. It matches the value the normal filer read handler
+	// uses and is capped by the segment's own chunk count.
+	hlsTsSegmentPrefetch = 4
+
+	// hlsTsTrackScanBytes bounds how much of the media start is inspected for the
+	// MPEG-TS PAT/PMT track tables at ingest.
+	hlsTsTrackScanBytes = 256 * 1024
 )
 
 type hlsTsRequestKind int
@@ -29,20 +38,27 @@ type hlsTsRequest struct {
 	Sequence   int64
 }
 
-func hlsTsEnabled() bool {
-	return util.GetViper().GetBool("filer.hls.ts.enabled")
+func (fs *FilerServer) hlsTsEnabled() bool {
+	return fs.option != nil && fs.option.HlsTsEnabled
 }
 
-// hlsTsMaxSegmentBytes follows the same maxMB semantics as normal filer
+// hlsTsMaxChunkBytes follows the same maxMB semantics as normal filer
 // auto-chunking: a positive request maxMB overrides the filer-wide MaxMB,
-// otherwise the regular filer MaxMB is inherited.
-func (fs *FilerServer) hlsTsMaxSegmentBytes(r *http.Request) int64 {
+// otherwise the regular filer MaxMB is inherited. A media segment larger than
+// this is stored as several chunks so no single chunk exceeds the volume needle
+// limit; the trailing chunk holds only the remainder, and a segment read still
+// fetches just the chunks that belong to that segment.
+func (fs *FilerServer) hlsTsMaxChunkBytes(r *http.Request) int64 {
 	parsedMaxMB, _ := strconv.ParseInt(r.URL.Query().Get("maxMB"), 10, 32)
 	maxMB := int32(parsedMaxMB)
 	if maxMB <= 0 && fs.option.MaxMB > 0 {
 		maxMB = int32(fs.option.MaxMB)
 	}
-	return int64(maxMB) * 1024 * 1024
+	limit := int64(maxMB) * 1024 * 1024
+	// Align the limit down to a whole number of MPEG-TS packets so a chunk split
+	// never cuts a packet; the segment's trailing chunk still carries the
+	// remainder. A zero limit (no maxMB configured) stores one chunk per segment.
+	return limit - limit%media_hls.TSPacketSize
 }
 
 func parseHlsTsRequest(requestPath string, method string) (hlsTsRequest, bool) {
@@ -97,7 +113,7 @@ func hlsTsJwtSourcePath(requestPath, method string) (string, bool) {
 }
 
 func (fs *FilerServer) maybeHandleHlsTs(w http.ResponseWriter, r *http.Request) bool {
-	if !hlsTsEnabled() {
+	if !fs.hlsTsEnabled() {
 		return false
 	}
 	parsed, belongs := parseHlsTsRequest(r.URL.Path, r.Method)

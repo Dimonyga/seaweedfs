@@ -52,14 +52,58 @@ func (fs *FilerServer) hlsTsPlaylistHandler(w http.ResponseWriter, r *http.Reque
 		}
 		return
 	}
-	body := media_hls.RenderMediaPlaylist(metadata)
-	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+
+	var body []byte
+	contentType := "application/vnd.apple.mpegurl"
+	if r.URL.Query().Get("format") == "json" {
+		body, err = buildHlsTsMediaInfo(metadata, int64(entry.FileSize))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		contentType = "application/json"
+	} else {
+		body = media_hls.RenderMediaPlaylist(metadata)
+	}
+
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	applyHlsTsPassthroughHeaders(w, entry)
 	if r.Method == http.MethodHead {
 		return
 	}
 	_, _ = w.Write(body)
+}
+
+// hlsTsMediaInfo is the JSON media description served for a "?format=json"
+// playlist request: the container summary and the MPEG-TS tracks the filer
+// derived from the stored stream itself. The filer reports only what it can read
+// back; it does not persist externally supplied media metadata.
+type hlsTsMediaInfo struct {
+	Version        int               `json:"version"`
+	TargetDuration int               `json:"target_duration"`
+	MediaSequence  int64             `json:"media_sequence"`
+	SegmentCount   int               `json:"segment_count"`
+	Duration       float64           `json:"duration"`
+	Size           int64             `json:"size"`
+	Tracks         []media_hls.Track `json:"tracks,omitempty"`
+}
+
+func buildHlsTsMediaInfo(metadata *media_hls.Metadata, size int64) ([]byte, error) {
+	var duration float64
+	for _, segment := range metadata.Segments {
+		duration += segment.Duration
+	}
+	info := hlsTsMediaInfo{
+		Version:        metadata.Version,
+		TargetDuration: metadata.TargetDuration,
+		MediaSequence:  metadata.MediaSequence,
+		SegmentCount:   len(metadata.Segments),
+		Duration:       duration,
+		Size:           size,
+		Tracks:         metadata.Tracks,
+	}
+	return json.MarshalIndent(&info, "", "  ")
 }
 
 func (fs *FilerServer) hlsTsSegmentHandler(w http.ResponseWriter, r *http.Request, sourcePath string, sequence int64) {
@@ -88,7 +132,12 @@ func (fs *FilerServer) hlsTsSegmentHandler(w http.ResponseWriter, r *http.Reques
 
 	streamCtx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
 	defer cancel()
-	streamFn, err := filer.PrepareStreamContentWithPrefetch(streamCtx, fs.filer.MasterClient, fs.maybeGetVolumeReadJwtAuthorizationToken, entry.GetChunks(), segment.Offset, segment.Size, fs.option.DownloadMaxBytesPs, 1)
+	// A segment may span several chunks when it is larger than the chunk limit.
+	// Prefetch overlaps the next chunk's volume fetch with delivering the
+	// current one, and stays within the requested [offset,size) range so it
+	// never reads past the segment. A single-chunk segment has nothing to
+	// prefetch, so this matches the plain streaming path there.
+	streamFn, err := filer.PrepareStreamContentWithPrefetch(streamCtx, fs.filer.MasterClient, fs.maybeGetVolumeReadJwtAuthorizationToken, entry.GetChunks(), segment.Offset, segment.Size, fs.option.DownloadMaxBytesPs, hlsTsSegmentPrefetch)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

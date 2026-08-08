@@ -225,7 +225,7 @@ func (fs *FilerServer) maybeCheckJwtAuthorization(r *http.Request, isWrite bool)
 		return true
 	}
 
-	return fs.checkJwtAuthorization(r, isWrite, jwtScopedRequestPaths(r))
+	return fs.checkJwtAuthorization(r, isWrite, fs.jwtScopedRequestPaths(r))
 }
 
 // checkJwtAuthorization verifies the request carries a valid filer JWT for the
@@ -318,9 +318,9 @@ func authorizeFilerJwtPaths(r *http.Request, claims *security.SeaweedFilerClaims
 // covered by the JWT AllowedPrefixes: the write target (r.URL.Path) plus any
 // copy/move source named by the cp.from / mv.from query parameters. HLS virtual
 // requests are authorized against their underlying filer entry path.
-func jwtScopedRequestPaths(r *http.Request) []string {
+func (fs *FilerServer) jwtScopedRequestPaths(r *http.Request) []string {
 	targetPath := r.URL.Path
-	if hlsTsEnabled() {
+	if fs.hlsTsEnabled() {
 		if sourcePath, ok := hlsTsJwtSourcePath(r.URL.Path, r.Method); ok {
 			targetPath = sourcePath
 		}

@@ -13,6 +13,13 @@ import (
 const (
 	MetadataVersion  = 1
 	MaxPlaylistBytes = 16 * 1024 * 1024
+
+	// TSPacketSize is the fixed MPEG-TS transport packet length. Every packet
+	// starts with the 0x47 sync byte, and a TS muxer emits nothing but whole
+	// packets, so a valid single-file HLS media payload is always a multiple of
+	// this size.
+	TSPacketSize = 188
+	tsSyncByte   = 0x47
 )
 
 type Metadata struct {
@@ -20,6 +27,7 @@ type Metadata struct {
 	TargetDuration int       `json:"target_duration"`
 	MediaSequence  int64     `json:"media_sequence,omitempty"`
 	Segments       []Segment `json:"segments"`
+	Tracks         []Track   `json:"tracks,omitempty"`
 }
 
 type Segment struct {
@@ -198,6 +206,24 @@ func Validate(metadata *Metadata, fileSize, maxSegmentSize int64) error {
 	}
 	if fileSize >= 0 && expectedOffset != fileSize {
 		return fmt.Errorf("playlist describes %d bytes but media file has %d", expectedOffset, fileSize)
+	}
+	return nil
+}
+
+// ValidateTSPackets verifies that data is a whole number of MPEG-TS packets,
+// each beginning with the 0x47 sync byte. Media segmented by a TS muxer is
+// always packet aligned, so a payload that fails this check is not the MPEG-TS
+// content this endpoint serves (an MP4 or fragmented MP4, say). Callers pass
+// packet-aligned buffers, so the check runs during ingest and rejects an
+// unsupported upload immediately instead of deferring the failure to playback.
+func ValidateTSPackets(data []byte) error {
+	if len(data)%TSPacketSize != 0 {
+		return fmt.Errorf("media is not MPEG-TS: %d bytes is not a multiple of the %d-byte packet size", len(data), TSPacketSize)
+	}
+	for offset := 0; offset < len(data); offset += TSPacketSize {
+		if data[offset] != tsSyncByte {
+			return fmt.Errorf("media is not MPEG-TS: missing 0x47 sync byte at packet offset %d", offset)
+		}
 	}
 	return nil
 }
