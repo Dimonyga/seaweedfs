@@ -19,6 +19,10 @@ const (
 	// fetches concurrently. It matches the value the normal filer read handler
 	// uses and is capped by the segment's own chunk count.
 	hlsTsSegmentPrefetch = 4
+
+	// hlsTsTrackScanBytes bounds how much of the media start is inspected for
+	// MPEG-TS PAT/PMT tables while ingesting media-info metadata.
+	hlsTsTrackScanBytes = 256 * 1024
 )
 
 type hlsTsRequestKind int
@@ -40,12 +44,6 @@ func (fs *FilerServer) hlsTsEnabled() bool {
 	return fs.option != nil && fs.option.HlsTsEnabled
 }
 
-// hlsTsMaxChunkBytes follows the same maxMB semantics as normal filer
-// auto-chunking: a positive request maxMB overrides the filer-wide MaxMB,
-// otherwise the regular filer MaxMB is inherited. A media segment larger than
-// this is stored as several chunks so no single chunk exceeds the regular filer
-// chunk size; the trailing chunk holds only the remainder, and a segment read
-// still fetches just the chunks that belong to that segment.
 func (fs *FilerServer) hlsTsMaxChunkBytes(r *http.Request) int64 {
 	parsedMaxMB, _ := strconv.ParseInt(r.URL.Query().Get("maxMB"), 10, 32)
 	maxMB := int32(parsedMaxMB)
@@ -53,9 +51,6 @@ func (fs *FilerServer) hlsTsMaxChunkBytes(r *http.Request) int64 {
 		maxMB = int32(fs.option.MaxMB)
 	}
 	limit := int64(maxMB) * 1024 * 1024
-	// Align the limit down to a whole number of MPEG-TS packets so a chunk split
-	// never cuts a packet; the segment's trailing chunk still carries the
-	// remainder. A zero limit (no maxMB configured) stores one chunk per segment.
 	return limit - limit%media_hls.TSPacketSize
 }
 
@@ -67,7 +62,6 @@ func parseHlsTsRequest(requestPath string, method string) (hlsTsRequest, bool) {
 	if relative == "" {
 		return hlsTsRequest{}, true
 	}
-
 	if method == http.MethodPost || method == http.MethodPut {
 		source := "/" + strings.Trim(relative, "/")
 		if source == "/" {
@@ -75,7 +69,6 @@ func parseHlsTsRequest(requestPath string, method string) (hlsTsRequest, bool) {
 		}
 		return hlsTsRequest{SourcePath: path.Clean(source), Kind: hlsTsRequestIngest}, true
 	}
-
 	if method != http.MethodGet && method != http.MethodHead {
 		return hlsTsRequest{}, true
 	}
@@ -86,7 +79,6 @@ func parseHlsTsRequest(requestPath string, method string) (hlsTsRequest, bool) {
 		}
 		return hlsTsRequest{SourcePath: path.Clean("/" + source), Kind: hlsTsRequestPlaylist}, true
 	}
-
 	dir, file := path.Split(relative)
 	if dir == "" || !strings.HasSuffix(file, ".ts") {
 		return hlsTsRequest{}, true
@@ -110,9 +102,6 @@ func hlsTsJwtSourcePath(requestPath, method string) (string, bool) {
 	return parsed.SourcePath, true
 }
 
-// shouldBypassHlsTsReadJwt reports whether this GET/HEAD belongs to the HLS
-// virtual namespace and security.toml explicitly allows HLS playback without a
-// filer read JWT. HLS ingest never bypasses the normal filer write JWT policy.
 func (fs *FilerServer) shouldBypassHlsTsReadJwt(r *http.Request) bool {
 	if !fs.hlsTsEnabled() || fs.hlsTsReadJwtRequired.Load() {
 		return false
@@ -136,7 +125,6 @@ func (fs *FilerServer) maybeHandleHlsTs(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid HLS TS request", http.StatusBadRequest)
 		return true
 	}
-
 	switch parsed.Kind {
 	case hlsTsRequestIngest:
 		fs.hlsTsIngestHandler(w, r, parsed.SourcePath)

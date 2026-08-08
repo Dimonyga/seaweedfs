@@ -29,6 +29,7 @@ type Metadata struct {
 	TargetDuration int       `json:"target_duration"`
 	MediaSequence  int64     `json:"media_sequence,omitempty"`
 	Segments       []Segment `json:"segments"`
+	Tracks         []Track   `json:"tracks,omitempty"`
 }
 
 type Segment struct {
@@ -188,8 +189,6 @@ func ParseSingleFilePlaylist(data []byte) (*Metadata, error) {
 		return nil, errors.New("EXT-X-MEDIA-SEQUENCE overflows segment numbering")
 	}
 
-	// RFC 8216 requires EXT-X-TARGETDURATION to be at least each EXTINF
-	// duration rounded to the nearest integer.
 	minimumTarget := int(math.Floor(maxDuration + 0.5))
 	if minimumTarget < 1 {
 		minimumTarget = 1
@@ -238,12 +237,6 @@ func Validate(metadata *Metadata, fileSize, maxSegmentSize int64) error {
 	return nil
 }
 
-// ValidateTSPackets verifies that data is a whole number of MPEG-TS packets,
-// each beginning with the 0x47 sync byte. Media segmented by a TS muxer is
-// always packet aligned, so a payload that fails this check is not the MPEG-TS
-// content this endpoint serves (an MP4 or fragmented MP4, say). Callers pass
-// packet-aligned buffers, so the check runs during ingest and rejects an
-// unsupported upload immediately instead of deferring the failure to playback.
 func ValidateTSPackets(data []byte) error {
 	if len(data)%TSPacketSize != 0 {
 		return fmt.Errorf("media is not MPEG-TS: %d bytes is not a multiple of the %d-byte packet size", len(data), TSPacketSize)

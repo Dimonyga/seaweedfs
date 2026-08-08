@@ -18,9 +18,7 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/util"
 )
 
-type hlsTsStorageError struct {
-	err error
-}
+type hlsTsStorageError struct{ err error }
 
 func (e *hlsTsStorageError) Error() string { return e.err.Error() }
 func (e *hlsTsStorageError) Unwrap() error { return e.err }
@@ -54,6 +52,7 @@ func (fs *FilerServer) hlsTsIngestHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if playlistPart.FormName() != "playlist" {
+		playlistPart.Close()
 		writeJsonError(w, r, http.StatusBadRequest, errors.New("first multipart part must be named playlist"))
 		return
 	}
@@ -85,6 +84,7 @@ func (fs *FilerServer) hlsTsIngestHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if mediaPart.FormName() != "media" {
+		mediaPart.Close()
 		writeJsonError(w, r, http.StatusBadRequest, errors.New("second multipart part must be named media"))
 		return
 	}
@@ -105,10 +105,17 @@ func (fs *FilerServer) hlsTsIngestHandler(w http.ResponseWriter, r *http.Request
 	}
 
 	var fileChunks []*filer_pb.FileChunk
+	var streamStart []byte
 	cleanup := func() { fs.filer.DeleteUncommittedChunks(context.WithoutCancel(ctx), fileChunks) }
 	err = media_hls.WalkSegmentChunks(mediaPart, metadata, maxChunkBytes, func(_ int, chunkOffset int64, data []byte) error {
 		if err := media_hls.ValidateTSPackets(data); err != nil {
 			return err
+		}
+		if need := hlsTsTrackScanBytes - len(streamStart); need > 0 {
+			if need > len(data) {
+				need = len(data)
+			}
+			streamStart = append(streamStart, data[:need]...)
 		}
 		chunks, uploadErr := fs.dataToChunkWithSSE(ctx, r, path.Base(sourcePath), "video/MP2T", data, chunkOffset, so)
 		fileChunks = append(fileChunks, chunks...)
@@ -122,6 +129,7 @@ func (fs *FilerServer) hlsTsIngestHandler(w http.ResponseWriter, r *http.Request
 		writeJsonError(w, r, hlsTsIngestErrorStatus(err), err)
 		return
 	}
+	metadata.Tracks = media_hls.ParseTracks(streamStart)
 	if extraPart, nextErr := multipartReader.NextPart(); nextErr != io.EOF {
 		cleanup()
 		if nextErr == nil {
@@ -165,5 +173,5 @@ func (fs *FilerServer) hlsTsIngestHandler(w http.ResponseWriter, r *http.Request
 		writeJsonError(w, r, http.StatusInternalServerError, err)
 		return
 	}
-	writeJsonQuiet(w, r, http.StatusCreated, map[string]interface{}{"path": sourcePath, "size": totalSize, "segments": len(metadata.Segments)})
+	writeJsonQuiet(w, r, http.StatusCreated, map[string]interface{}{"path": sourcePath, "size": totalSize, "segments": len(metadata.Segments), "tracks": len(metadata.Tracks)})
 }
